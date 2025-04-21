@@ -24,6 +24,7 @@ def get_minute_data(client, symbol, days=90):
     - periodType must be "day"
     - frequencyType must be "minute"
     - frequency options are: 1, 5, 10, 15, 30
+    Includes extended hours and pre-market data
     """
     logger.info(f"Starting minute data fetch for symbol: {symbol}")
     all_data = []
@@ -48,7 +49,8 @@ def get_minute_data(client, symbol, days=90):
                 period=str(min(chunk_size, days - i)),  # Number of days for this chunk
                 frequencyType="minute",
                 frequency="1",  # Explicitly request 1-minute intervals
-                endDate=int(chunk_end.timestamp() * 1000)  # Convert to milliseconds
+                endDate=int(chunk_end.timestamp() * 1000),  # Convert to milliseconds
+                needExtendedHoursData=True  # Include extended hours data
             )
             
             logger.debug(f"API Response status code: {response.status_code}")
@@ -100,6 +102,7 @@ def get_daily_data(client, symbol, days=365):
     """
     Get daily data for the last specified days
     Using year periodType for daily data
+    Includes extended hours data
     """
     logger.info(f"Starting daily data fetch for symbol: {symbol}")
     
@@ -110,7 +113,8 @@ def get_daily_data(client, symbol, days=365):
             periodType="year",
             period="1",  # Last 1 year
             frequency="1",  # 1 day frequency
-            frequencyType="daily"
+            frequencyType="daily",
+            needExtendedHoursData=True  # Include extended hours data
         )
         
         logger.debug(f"API Response status code: {response.status_code}")
