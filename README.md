@@ -1,22 +1,26 @@
-# Schwab Historical Data Fetcher
+# Options Trading Analysis Dashboard
 
-A Python application for fetching historical stock data from Charles Schwab's API. This tool supports fetching both minute-by-minute and daily historical price data.
+A real-time options trading analysis dashboard built with Python, featuring technical analysis, options chain data, and market indicators.
 
 ## Features
 
-- Fetch minute-by-minute stock data (configurable for last 90 days)
-- Fetch daily stock data (up to 1 year)
-- Handles rate limiting and chunked requests
-- Comprehensive error handling and logging
-- Removes duplicate data points
-- Configurable through environment variables
+- Real-time stock data visualization
+- Technical analysis across multiple timeframes (1min, 15min, 1h, daily)
+- Options chain data with Greeks
+- Advanced technical indicators:
+  - Trend Following (SMA, EMA, MACD)
+  - Momentum Indicators (RSI, Stochastic)
+  - Volatility Indicators (Bollinger Bands, ATR)
+  - Volume Analysis (OBV)
+  - Pattern Recognition
+  - Fair Value Gap Detection
 
 ## Setup
 
 1. Clone the repository:
 ```bash
-git clone [your-repo-url]
-cd [repo-name]
+git clone https://github.com/yourusername/options-analysis.git
+cd options-analysis
 ```
 
 2. Create and activate a virtual environment:
@@ -34,30 +38,50 @@ pip install -r requirements.txt
 ```
 SCHWAB_APP_KEY=your_app_key
 SCHWAB_APP_SECRET=your_app_secret
-SCHWAB_CALLBACK_URL=your_callback_url
+SCHWAB_REDIRECT_URI=your_callback_url
+```
+
+5. Run the application:
+```bash
+python app.py
 ```
 
 ## Usage
 
-Run the main script:
-```bash
-python get_historical_data.py
-```
+1. Enter a stock symbol in the input field
+2. Click "Fetch Data" to load market data
+3. Use the tabs to view different analyses:
+   - Minute Data
+   - Daily Data
+   - Options Chain
+   - Technical Analysis
 
-The script will prompt you to enter a stock symbol, and then it will fetch both minute and daily historical data for that symbol.
+## Technical Analysis Parameters
 
-## Logging
+### 1-Minute Chart
+- Trend Following: 30 bars
+- Momentum: RSI 14 (14 min)
+- Volatility: BB 20 & ATR 14
+- Volume: MFI 14 (14 min)
 
-The application logs detailed information to both the console and a `schwab_data.log` file. You can adjust the logging level in the code if needed.
+### 15-Minute Chart
+- Trend Following: 16 bars
+- Momentum: RSI 14 (3½ hr)
+- Volatility: BB 20 & ATR 14
+- Volume: MFI 14 (3½ hr)
 
-## Error Handling
+### 1-Hour Chart
+- Trend Following: 24 bars
+- Momentum: RSI 14 (14 hr)
+- Volatility: BB 20 & ATR 14
+- Volume: MFI 14 (14 hr)
 
-The application includes comprehensive error handling for:
-- API connection issues
-- Missing credentials
-- Invalid responses
-- Rate limiting
+### Daily Chart
+- Trend Following: 20 bars
+- Momentum: RSI 14 (14 days)
+- Volatility: BB 20 & ATR 14
+- Volume: MFI 14 (14 days)
 
-## Contributing
+## License
 
-Feel free to submit issues and pull requests. 
+MIT License 

@@ -86,6 +86,154 @@ class AdvancedTechnicalAnalysis:
         
         logger.info(f"Initialized AdvancedTechnicalAnalysis with {len(df)} rows of {timeframe} data")
     
+    def sma(self, period: int = 20) -> float:
+        """Calculate Simple Moving Average for the latest point."""
+        return self.df['Close'].rolling(period).mean().iloc[-1]
+    
+    def ema(self, period: int = 20) -> float:
+        """Calculate Exponential Moving Average for the latest point."""
+        return self.df['Close'].ewm(span=period, adjust=False).mean().iloc[-1]
+    
+    def macd(self) -> float:
+        """Calculate MACD line for the latest point."""
+        fast = self.df['Close'].ewm(span=12, adjust=False).mean()
+        slow = self.df['Close'].ewm(span=26, adjust=False).mean()
+        return (fast - slow).iloc[-1]
+    
+    def macd_signal(self) -> float:
+        """Calculate MACD signal line for the latest point."""
+        fast = self.df['Close'].ewm(span=12, adjust=False).mean()
+        slow = self.df['Close'].ewm(span=26, adjust=False).mean()
+        macd = fast - slow
+        return macd.ewm(span=9, adjust=False).mean().iloc[-1]
+    
+    def macd_hist(self) -> float:
+        """Calculate MACD histogram for the latest point."""
+        return self.macd() - self.macd_signal()
+    
+    def rsi(self, period: int = 14) -> float:
+        """Calculate RSI for the latest point."""
+        delta = self.df['Close'].diff()
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
+        avg_gain = gain.ewm(span=period, adjust=False).mean()
+        avg_loss = loss.ewm(span=period, adjust=False).mean()
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+        return rsi.iloc[-1]
+    
+    def stoch_k(self, period: int = 14) -> float:
+        """Calculate Stochastic %K for the latest point."""
+        hh = self.df['High'].rolling(period).max()
+        ll = self.df['Low'].rolling(period).min()
+        k = 100 * (self.df['Close'] - ll) / (hh - ll)
+        return k.iloc[-1]
+    
+    def stoch_d(self, period: int = 14) -> float:
+        """Calculate Stochastic %D for the latest point."""
+        k = self.stoch_k(period)
+        return self.df['Close'].rolling(3).mean().iloc[-1]
+    
+    def bollinger_upper(self, period: int = 20, std: int = 2) -> float:
+        """Calculate upper Bollinger Band for the latest point."""
+        ma = self.df['Close'].rolling(period).mean()
+        std_dev = self.df['Close'].rolling(period).std()
+        return (ma + std_dev * std).iloc[-1]
+    
+    def bollinger_middle(self, period: int = 20) -> float:
+        """Calculate middle Bollinger Band for the latest point."""
+        return self.df['Close'].rolling(period).mean().iloc[-1]
+    
+    def bollinger_lower(self, period: int = 20, std: int = 2) -> float:
+        """Calculate lower Bollinger Band for the latest point."""
+        ma = self.df['Close'].rolling(period).mean()
+        std_dev = self.df['Close'].rolling(period).std()
+        return (ma - std_dev * std).iloc[-1]
+    
+    def atr(self, period: int = 14) -> float:
+        """Calculate Average True Range for the latest point."""
+        high_low = self.df['High'] - self.df['Low']
+        high_close = np.abs(self.df['High'] - self.df['Close'].shift())
+        low_close = np.abs(self.df['Low'] - self.df['Close'].shift())
+        ranges = pd.concat([high_low, high_close, low_close], axis=1)
+        true_range = np.max(ranges, axis=1)
+        return true_range.rolling(period).mean().iloc[-1]
+    
+    def obv(self) -> float:
+        """Calculate On Balance Volume for the latest point."""
+        obv = (np.sign(self.df['Close'].diff()) * self.df['Volume']).cumsum()
+        return obv.iloc[-1]
+    
+    def volume_sma(self, period: int = 20) -> float:
+        """Calculate Volume SMA for the latest point."""
+        return self.df['Volume'].rolling(period).mean().iloc[-1]
+    
+    def doji(self) -> bool:
+        """Check if the latest candle is a doji."""
+        latest = self.df.iloc[-1]
+        body = abs(latest['Open'] - latest['Close'])
+        wick = latest['High'] - latest['Low']
+        return body <= (wick * 0.1)  # Body is less than 10% of the total range
+    
+    def hammer(self) -> bool:
+        """Check if the latest candle is a hammer."""
+        latest = self.df.iloc[-1]
+        body = abs(latest['Open'] - latest['Close'])
+        lower_wick = min(latest['Open'], latest['Close']) - latest['Low']
+        upper_wick = latest['High'] - max(latest['Open'], latest['Close'])
+        return (lower_wick > (body * 2)) and (upper_wick <= (body * 0.1))
+    
+    def engulfing(self) -> bool:
+        """Check if the latest candle is an engulfing pattern."""
+        if len(self.df) < 2:
+            return False
+        current = self.df.iloc[-1]
+        previous = self.df.iloc[-2]
+        return (current['Open'] < previous['Close'] and current['Close'] > previous['Open']) or \
+               (current['Open'] > previous['Close'] and current['Close'] < previous['Open'])
+    
+    def morning_star(self) -> bool:
+        """Check if the latest three candles form a morning star pattern."""
+        if len(self.df) < 3:
+            return False
+        first = self.df.iloc[-3]
+        second = self.df.iloc[-2]
+        third = self.df.iloc[-1]
+        return (first['Close'] < first['Open']) and \
+               (abs(second['Open'] - second['Close']) < abs(first['Open'] - first['Close']) * 0.1) and \
+               (third['Close'] > third['Open']) and \
+               (second['Close'] < first['Close']) and \
+               (third['Close'] > first['Open'])
+    
+    def evening_star(self) -> bool:
+        """Check if the latest three candles form an evening star pattern."""
+        if len(self.df) < 3:
+            return False
+        first = self.df.iloc[-3]
+        second = self.df.iloc[-2]
+        third = self.df.iloc[-1]
+        return (first['Close'] > first['Open']) and \
+               (abs(second['Open'] - second['Close']) < abs(first['Open'] - first['Close']) * 0.1) and \
+               (third['Close'] < third['Open']) and \
+               (second['Close'] > first['Close']) and \
+               (third['Close'] < first['Open'])
+    
+    def three_white_soldiers(self) -> bool:
+        """Check if the latest three candles form three white soldiers pattern."""
+        if len(self.df) < 3:
+            return False
+        last_three = self.df.iloc[-3:]
+        return all(last_three['Close'] > last_three['Open']) and \
+               all(last_three['Close'].diff().dropna() > 0)
+    
+    def three_black_crows(self) -> bool:
+        """Check if the latest three candles form three black crows pattern."""
+        if len(self.df) < 3:
+            return False
+        last_three = self.df.iloc[-3:]
+        return all(last_three['Close'] < last_three['Open']) and \
+               all(last_three['Close'].diff().dropna() < 0)
+    
     def calculate_all_indicators(self) -> pd.DataFrame:
         """
         Calculate all technical indicators for the given timeframe.
@@ -405,7 +553,7 @@ class AdvancedTechnicalAnalysis:
             return (self.df['Close'].shift(1) < self.df['Open'].shift(1)) & \
                    (self.df['Close'] > self.df['Open']) & \
                    (self.df['Open'] < self.df['Low'].shift(1)) & \
-                   (this.df['Close'] > self.df['Open'].shift(1) + 0.5*(self.df['Close'].shift(1) - self.df['Open'].shift(1)))
+                   (self.df['Close'] > self.df['Open'].shift(1) + 0.5*(self.df['Close'].shift(1) - self.df['Open'].shift(1)))
         
         check_pattern(piercing_line, 'piercing_line')
         self.df['piercing_line_signal'] = 'bullish'
@@ -460,7 +608,7 @@ class AdvancedTechnicalAnalysis:
         def three_black_crows():
             first_bearish = self.df['Close'].shift(2) < self.df['Open'].shift(2)
             second_bearish = self.df['Close'].shift(1) < self.df['Open'].shift(1)
-            third_bearish = this.df['Close'] < self.df['Open']
+            third_bearish = self.df['Close'] < self.df['Open']
             second_opens_inside = (self.df['Open'].shift(1) < self.df['Open'].shift(2)) & (self.df['Open'].shift(1) > self.df['Close'].shift(2))
             third_opens_inside = (self.df['Open'] < self.df['Open'].shift(1)) & (self.df['Open'] > self.df['Close'].shift(1))
             return first_bearish & second_bearish & third_bearish & second_opens_inside & third_opens_inside

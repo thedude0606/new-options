@@ -25,12 +25,19 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import threading
 import random
-from technical_indicators import TechnicalAnalysis
 import numpy as np
+from advanced_technical_analysis import AdvancedTechnicalAnalysis
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger('app')
+
+# Initialize global variables
+stored_minute_data = []
+stored_daily_data = []
+client = None
+options_handler = None
+latest_options_data = {}
 
 # Initialize Dash app
 logger.info("Initializing Dash application")
@@ -54,219 +61,6 @@ logger.info(f"Initializing client with app_key: {app_key[:5]}... and app_secret:
 client = schwabdev.Client(app_key=app_key, app_secret=app_secret, callback_url=callback_url)
 
 # Initialize options handler with the client
-class Signal:
-    """Simple signal/slot implementation."""
-    def __init__(self):
-        self._callbacks = []
-        
-    def connect(self, callback):
-        self._callbacks.append(callback)
-        
-    def emit(self, *args, **kwargs):
-        for callback in self._callbacks:
-            callback(*args, **kwargs)
-            
-    def disconnect(self, callback):
-        if callback in self._callbacks:
-            self._callbacks.remove(callback)
-
-class OptionsStreamHandler:
-    def __init__(self):
-        """Initialize the options handler."""
-        self.client = None
-        self.stream_active = False
-        self.contracts = {}
-        self.lock = threading.Lock()
-        self.data_updated = Signal()
-        self.debug_mode = True
-        logger.info("OptionsStreamHandler initialized")
-        
-    def initialize(self, client):
-        """Initialize with a client."""
-        self.client = client
-        logger.info("OptionsStreamHandler initialized with client")
-        return True
-
-    def on_message(self, message):
-        """Handle incoming messages from the stream."""
-        try:
-            # Log the complete message structure
-            logger.info("=== Received Message ===")
-            logger.info(f"Message Type: {type(message)}")
-            logger.info(f"Message Content: {json.dumps(message, indent=2) if isinstance(message, (dict, list)) else message}")
-            
-            if not message:
-                logger.warning("Received empty message")
-                return
-            
-            # Parse the message if it's a string
-            if isinstance(message, str):
-                try:
-                    message = json.loads(message)
-                    logger.debug("Successfully parsed message string to JSON")
-                except json.JSONDecodeError as e:
-                    logger.error(f"Failed to parse message as JSON: {str(e)}")
-                    return
-            
-            # Process the message based on its structure
-            if isinstance(message, dict):
-                if 'data' in message:
-                    logger.debug("Processing message with 'data' field")
-                    for data_item in message['data']:
-                        if data_item.get('service') == 'LEVELONE_OPTIONS':
-                            logger.debug("Found LEVELONE_OPTIONS data")
-                            content = data_item.get('content', [])
-                            logger.debug(f"Content items: {len(content)}")
-                            for item in content:
-                                if 'key' in item:
-                                    symbol = item['key']
-                                    logger.debug(f"Processing option: {symbol}")
-                                    # Update the contract data
-                                    with self.lock:
-                                        if symbol not in self.contracts:
-                                            self.contracts[symbol] = {}
-                                        # Update fields
-                                        for field_id, value in item.items():
-                                            if field_id != 'key':
-                                                self.contracts[symbol][field_id] = value
-                                        logger.debug(f"Updated contract data for {symbol}")
-                            
-                    # Emit update with all contracts
-                    with self.lock:
-                        contracts_list = list(self.contracts.values())
-                        logger.info(f"Emitting update with {len(contracts_list)} contracts")
-                        self.data_updated.emit(contracts_list)
-                else:
-                    logger.warning("Message does not contain 'data' field")
-            else:
-                logger.warning(f"Unexpected message type: {type(message)}")
-            
-        except Exception as e:
-            logger.error(f"Error in message handler: {str(e)}", exc_info=True)
-            
-    def start_stream(self, symbol):
-        """Start streaming options data for the given symbol."""
-        try:
-            # Get option chain first to validate symbol and get option symbols
-            logger.info(f"Fetching option chain for {symbol}")
-            chain = self.client.option_chains(
-                symbol=symbol,
-                contractType='ALL',
-                range='ALL',
-                strikeCount=10  # Limit for testing
-            )
-            
-            if not chain:
-                logger.error("No response from options chain API")
-                return False
-                
-            # Convert to JSON if needed
-            chain_data = chain.json() if hasattr(chain, 'json') else chain
-            logger.debug(f"Option chain response: {json.dumps(chain_data, indent=2)}")
-            
-            # Extract option symbols from chain
-            option_symbols = []
-            
-            # Process calls and puts
-            for exp_map_key in ['callExpDateMap', 'putExpDateMap']:
-                if exp_map_key in chain_data:
-                    for exp_date, strikes in chain_data[exp_map_key].items():
-                        for strike, options in strikes.items():
-                            for option in options:
-                                option_symbols.append(option['symbol'])
-                                logger.info(f"Found option: {option['symbol']}")
-            
-            if not option_symbols:
-                logger.error("No option symbols found in chain")
-                return False
-                
-            logger.info(f"Found {len(option_symbols)} options to stream")
-            
-            # Create subscription request with all fields
-            fields = [str(i) for i in range(56)]  # Fields 0-55
-            
-            subscription_request = {
-                "requests": [{
-                    "service": "LEVELONE_OPTIONS",
-                    "command": "SUBS",
-                    "requestid": "1",
-                    "parameters": {
-                        "keys": ','.join(option_symbols),
-                        "fields": ','.join(fields)
-                    }
-                }]
-            }
-            
-            logger.info("Sending subscription request:")
-            logger.info(json.dumps(subscription_request, indent=2))
-            
-            # Start the stream
-            try:
-                if not hasattr(self.client, 'stream'):
-                    logger.error("Client does not have 'stream' attribute")
-                    return False
-                
-                # Clear existing data
-                with self.lock:
-                    self.contracts.clear()
-                    logger.debug("Cleared existing contracts")
-                
-                # Start the streamer with our message handler
-                self.client.stream.start(self.on_message)
-                logger.info("Streamer started with message handler")
-                
-                # Subscribe to options data
-                request = self.client.stream.level_one_options(
-                    keys=','.join(option_symbols),
-                    fields=','.join(fields),
-                    command="SUBS"
-                )
-                self.client.stream.send(request)
-                logger.info("Sent subscription request")
-                
-                with self.lock:
-                    self.stream_active = True
-                    logger.info(f"Successfully started options stream for {len(option_symbols)} contracts")
-                
-                return True
-                
-            except Exception as e:
-                logger.error(f"Error starting stream: {e}", exc_info=True)
-                return False
-            
-        except Exception as e:
-            logger.error(f"Error starting options stream: {str(e)}", exc_info=True)
-            return False
-    
-    def stop_stream(self):
-        """Stop the options data stream."""
-        try:
-            if hasattr(self.client, 'stream'):
-                self.client.stream.stop()
-                logger.info("Stopped options stream")
-        except Exception as e:
-            logger.error(f"Error stopping stream: {str(e)}", exc_info=True)
-        finally:
-            with self.lock:
-                self.stream_active = False
-                self.contracts.clear()
-                logger.debug("Cleared contracts and set stream inactive")
-    
-    def is_stream_active(self):
-        """Check if the stream is active."""
-        with self.lock:
-            return self.stream_active
-    
-    def get_contracts(self):
-        """Get the current contracts data."""
-        with self.lock:
-            contracts = list(self.contracts.values())
-            logger.debug(f"Returning {len(contracts)} contracts")
-            if contracts:
-                logger.debug(f"Sample contract: {json.dumps(contracts[0], indent=2)}")
-            return contracts
-
-# Create and initialize the options handler
 options_handler = OptionsStreamHandler()
 options_handler.initialize(client)
 logger.info("Options handler created and initialized")
@@ -326,25 +120,32 @@ def initialize_client():
 
 def process_data(data):
     """Process data into table format."""
-    if not data:
+    if data is None or (isinstance(data, pd.DataFrame) and data.empty):
         return []
     
     rows = []
+    
+    # If data is a DataFrame, convert it to a list of dictionaries
+    if isinstance(data, pd.DataFrame):
+        data = data.to_dict('records')
+    
     for row in data:
-        timestamp = row.get('datetime', 0)
-        et_tz = pytz.timezone('US/Eastern')
-        dt = datetime.fromtimestamp(timestamp/1000, tz=pytz.UTC)
-        dt_et = dt.astimezone(et_tz)
-        formatted_time = dt_et.strftime('%Y-%m-%d %H:%M:%S ET')
-        
-        rows.append({
-            'Time': formatted_time,
-            'Open': row.get('open', ''),
-            'High': row.get('high', ''),
-            'Low': row.get('low', ''),
-            'Close': row.get('close', ''),
-            'Volume': row.get('volume', '')
-        })
+        if isinstance(row, dict):
+            timestamp = row.get('datetime', 0)
+            et_tz = pytz.timezone('US/Eastern')
+            dt = datetime.fromtimestamp(timestamp/1000, tz=pytz.UTC)
+            dt_et = dt.astimezone(et_tz)
+            formatted_time = dt_et.strftime('%Y-%m-%d %H:%M:%S ET')
+            
+            rows.append({
+                'Time': formatted_time,
+                'Open': row.get('open', ''),
+                'High': row.get('high', ''),
+                'Low': row.get('low', ''),
+                'Close': row.get('close', ''),
+                'Volume': row.get('volume', '')
+            })
+    
     return rows
 
 # Add field mapping constants at the top of the file
@@ -543,7 +344,7 @@ def process_option_data(data):
 app.layout = html.Div([
     dcc.Store(id='options-data-store', data={'calls': [], 'puts': []}),
     dcc.Store(id='technical-analysis-store', data={}),
-    dcc.Interval(id='interval-component', interval=5000),  # 5 second interval
+    dcc.Interval(id='interval-component', interval=60000),  # 60 second interval (1 minute)
     html.H1("Stock Data Dashboard", style={'textAlign': 'center'}),
     
     # Single input section for all data
@@ -741,7 +542,7 @@ app.layout = html.Div([
                     'margin': '20px'
                 })
             ])
-        ])
+        ]),
     ]),
     
     dcc.Interval(id='options-update-interval', interval=1000),
@@ -755,22 +556,38 @@ app.layout = html.Div([
     [State('symbol-input', 'value')]
 )
 def update_data(n_clicks, symbol):
-    global stored_minute_data, stored_daily_data
-    if not symbol:
+    """Update the data tables when the fetch button is clicked."""
+    if not n_clicks or not symbol:
         raise PreventUpdate
-    symbol = symbol.upper()
+        
     try:
-        client = initialize_client()
-        stored_minute_data = get_minute_data(client, symbol)
-        stored_daily_data = get_daily_data(client, symbol)
-        minute_processed = process_data(stored_minute_data)
-        daily_processed = process_data(stored_daily_data)
-        status_message = f"Data fetched for {symbol}"
-        return minute_processed, daily_processed, status_message
+        # Initialize client if needed
+        global client, stored_minute_data, stored_daily_data
+        if not client:
+            client = initialize_client()
+            
+        # Fetch data
+        logger.info(f"Fetching data for {symbol}")
+        minute_data = get_minute_data(client, symbol)
+        daily_data = get_daily_data(client, symbol)
+        
+        # Store the data globally
+        stored_minute_data = minute_data
+        stored_daily_data = daily_data
+        
+        # Process data for display
+        minute_df = pd.DataFrame(minute_data)
+        daily_df = pd.DataFrame(daily_data)
+        
+        # Format the data
+        minute_table = process_data(minute_df)
+        daily_table = process_data(daily_df)
+        
+        return minute_table, daily_table, f"Data fetched successfully for {symbol}"
+        
     except Exception as e:
-        error_msg = f"Error: {str(e)}"
-        logger.error(error_msg, exc_info=True)
-        return [], [], error_msg
+        logger.error(f"Error fetching data: {str(e)}", exc_info=True)
+        return [], [], f"Error fetching data: {str(e)}"
 
 @callback(
     [Output('options-data-store', 'data'),
@@ -905,219 +722,379 @@ def update_options_tables(data):
         logger.error(f"Error in update_options_tables: {str(e)}", exc_info=True)
         return [], []
 
+def format_value(value):
+    """Format numeric values for display."""
+    if value is None:
+        return "N/A"
+    
+    if isinstance(value, (np.float64, np.float32)):
+        value = value.item()
+    
+    if isinstance(value, float):
+        if abs(value) < 0.01:
+            return f"{value:.4f}"
+        elif abs(value) < 1:
+            return f"{value:.3f}"
+        elif abs(value) < 100:
+            return f"{value:.2f}"
+        else:
+            return f"{value:.1f}"
+    return str(value)
+
+# Add this helper function at the top level
+def get_signal_style(signal):
+    """Return CSS style based on signal type."""
+    if signal == 'bullish':
+        return {'color': '#4CAF50', 'fontWeight': 'bold'}  # Green
+    elif signal == 'bearish':
+        return {'color': '#f44336', 'fontWeight': 'bold'}  # Red
+    elif signal == 'neutral':
+        return {'color': '#9E9E9E', 'fontWeight': 'normal'}  # Gray
+    else:
+        return {}
+
+def get_timeframe_params(timeframe):
+    """Get the parameters for each timeframe based on specifications."""
+    params = {
+        '1min': {
+            'trend_bars': 30,  # 30 bars for trend following
+            'momentum_bars': 14,  # RSI 14 uses last 14 min
+            'volatility_bars': 20,  # BB 20 & ATR 14
+            'volume_bars': 14,  # MFI 14 (14 min)
+            'pattern_bars': 10,  # Last 10 bars
+            'fvg_bars': 5  # Last 5 bars for gaps
+        },
+        '15min': {
+            'trend_bars': 16,  # 16 bars (<4 hr)
+            'momentum_bars': 14,  # RSI 14 (last 3½ hr)
+            'volatility_bars': 20,  # BB 20 & ATR 14
+            'volume_bars': 14,  # MFI 14 (3½ hr)
+            'pattern_bars': 10,  # Last 10 bars
+            'fvg_bars': 5  # Last 5 bars
+        },
+        '1h': {
+            'trend_bars': 24,  # 24 bars (~1 day)
+            'momentum_bars': 14,  # RSI 14 (last 14 hr)
+            'volatility_bars': 20,  # BB 20 & ATR 14
+            'volume_bars': 14,  # MFI 14 (14 hr)
+            'pattern_bars': 20,  # Last 20 bars
+            'fvg_bars': 10  # Last 10 bars
+        },
+        'daily': {
+            'trend_bars': 20,  # 20 bars (~1 month)
+            'momentum_bars': 14,  # RSI 14 (14 days)
+            'volatility_bars': 20,  # BB 20 & ATR 14
+            'volume_bars': 14,  # MFI 14 (14 days)
+            'pattern_bars': 20,  # Last 20 bars
+            'fvg_bars': 10  # Last 10 bars
+        }
+    }
+    return params.get(timeframe, params['daily'])
+
 @callback(
     Output('technical-analysis-output', 'children'),
     [Input('symbol-input', 'value'),
-     Input('interval-component', 'n_intervals')],
-    prevent_initial_call=True
+     Input('interval-component', 'n_intervals')]
 )
-def update_technical_analysis(symbol, n):
-    """Update technical analysis indicators."""
-    logger.info(f"Technical analysis callback triggered for symbol: {symbol}")
-    
+def update_technical_analysis(symbol, n_intervals):
+    """Update the technical analysis when the symbol changes or on interval."""
     if not symbol:
-        logger.warning("No symbol provided")
-        return html.Div("Please enter a symbol")
-    
+        raise PreventUpdate
+        
     try:
-        logger.info(f"Fetching technical analysis for {symbol}")
+        global stored_minute_data, stored_daily_data
         
-        # Get data from Schwab API
-        client = initialize_client()
-        logger.debug("Client initialized")
-        
-        daily_data = get_daily_data(client, symbol)
-        logger.debug(f"Retrieved {len(daily_data) if daily_data else 0} data points from Schwab API")
-        
-        if not daily_data:
-            logger.error(f"No data found for symbol {symbol}")
-            return html.Div(f"No data found for symbol {symbol}")
-        
-        # Convert to DataFrame
-        df = pd.DataFrame(daily_data)
-        logger.debug(f"Created DataFrame with columns: {df.columns.tolist()}")
-        
-        df = df.rename(columns={
-            'datetime': 'Time',
-            'open': 'Open',
-            'high': 'High',
-            'low': 'Low',
-            'close': 'Close',
-            'volume': 'Volume'
-        })
-        logger.debug(f"Renamed columns to: {df.columns.tolist()}")
-        
-        # Convert timestamp to datetime
-        df['Time'] = pd.to_datetime(df['Time'], unit='ms')
-        
-        # Sort by time
-        df = df.sort_values('Time')
-        
-        logger.debug(f"DataFrame shape: {df.shape}")
-        logger.debug(f"DataFrame head:\n{df.head()}")
-        
-        # Initialize technical analysis
-        logger.info("Initializing TechnicalAnalysis class")
-        ta = TechnicalAnalysis(df)
-        
-        # Calculate all timeframes
-        logger.info("Calculating multi-timeframe analysis")
-        analysis = ta.calculate_multi_timeframe_analysis()
-        
-        # Create layout for indicators
-        logger.info("Creating indicator display layout")
-        
-        # Helper function to format indicator value
-        def format_value(value, is_percent=False):
-            if value is None:
-                return "N/A"
+        if not stored_minute_data or not stored_daily_data:
+            logger.warning("No data available for technical analysis")
+            return html.Div("Please fetch data first using the 'Fetch Data' button.")
             
-            # Handle dictionary values
-            if isinstance(value, dict):
-                value = value.get('value', value)
-            
-            # Handle numpy types
-            if hasattr(value, 'item'):
-                value = value.item()
-                
-            if is_percent:
-                return f"{value:.2f}%"
-            return f"{value:.2f}"
+        logger.info(f"Calculating technical analysis for {symbol}")
         
-        # Helper function to create indicator section
-        def create_indicator_section(title, indicators):
-            return html.Div([
-                html.H5(title),
-                html.Div([
-                    html.Div([
-                        html.Strong(f"{k}: "),
-                        html.Span(format_value(v)),
-                        html.Span(f" ({v.get('signal', 'N/A') if isinstance(v, dict) else 'N/A'})")
-                    ]) for k, v in indicators.items()
-                ])
-            ])
+        # Convert data to DataFrame
+        minute_df = pd.DataFrame(stored_minute_data)
+        minute_df['datetime'] = pd.to_datetime(minute_df['datetime'], unit='ms')
+        minute_df.set_index('datetime', inplace=True)
+        minute_df = minute_df.rename(columns={
+            'open': 'Open', 'high': 'High', 'low': 'Low',
+            'close': 'Close', 'volume': 'Volume'
+        }).sort_index()
         
-        # Create sections for each timeframe
-        timeframe_sections = []
-        for timeframe, data in analysis.items():
-            sections = [
-                html.H4(f"{timeframe} Timeframe Analysis"),
+        timeframes = {
+            '1min': minute_df,
+            '15min': minute_df.resample('15min').agg({
+                'Open': 'first', 'High': 'max', 'Low': 'min',
+                'Close': 'last', 'Volume': 'sum'
+            }).dropna(),
+            '1h': minute_df.resample('1h').agg({
+                'Open': 'first', 'High': 'max', 'Low': 'min',
+                'Close': 'last', 'Volume': 'sum'
+            }).dropna(),
+            'daily': pd.DataFrame(stored_daily_data).assign(
+                datetime=lambda x: pd.to_datetime(x['datetime'], unit='ms')
+            ).set_index('datetime').rename(columns={
+                'open': 'Open', 'high': 'High', 'low': 'Low',
+                'close': 'Close', 'volume': 'Volume'
+            }).sort_index()
+        }
+        
+        all_sections = []
+        
+        for timeframe, df in timeframes.items():
+            try:
+                params = get_timeframe_params(timeframe)
+                ta = AdvancedTechnicalAnalysis(df, timeframe=timeframe)
+                timeframe_sections = []
                 
-                # Trend Indicators
-                create_indicator_section("Trend Indicators", {
-                    "SMA(20)": data['trend_indicators']['sma']['sma20'],
-                    "SMA(50)": data['trend_indicators']['sma']['sma50'],
-                    "SMA(200)": data['trend_indicators']['sma']['sma200'],
-                    "EMA(12)": data['trend_indicators']['ema']['ema12'],
-                    "EMA(26)": data['trend_indicators']['ema']['ema26'],
-                    "MACD": data['trend_indicators']['macd'],
-                    "HMA": data['trend_indicators']['hma'],
-                    "VWAP": data['trend_indicators']['vwap']
-                }),
+                # Get current values
+                close = df['Close'].iloc[-1]
+                prev_close = df['Close'].iloc[-2] if len(df) > 1 else close
                 
-                # Ichimoku Cloud
-                html.Div([
-                    html.H5("Ichimoku Cloud"),
+                # Trend Indicators (using specified bars for each timeframe)
+                trend_lookback = params['trend_bars']
+                sma = ta.sma(trend_lookback)
+                ema = ta.ema(trend_lookback)
+                macd = ta.macd()
+                macd_signal = ta.macd_signal()
+                
+                trend_signals = {
+                    'SMA': 'bullish' if close > sma else 'bearish',
+                    'EMA': 'bullish' if close > ema else 'bearish',
+                    'MACD': 'bullish' if macd > macd_signal else 'bearish'
+                }
+                
+                trend_section = html.Div([
+                    html.H4(f"Trend Indicators (last {trend_lookback} bars)"),
                     html.Div([
-                        html.Div([
-                            html.Strong("Tenkan: "),
-                            html.Span(format_value(data['trend_indicators']['ichimoku']['tenkan'])),
-                            html.Span(f" ({'Above' if data['trend_indicators']['ichimoku']['tenkan_above_kijun'] else 'Below'} Kijun)")
+                        html.P([
+                            f"SMA ({trend_lookback}): ", 
+                            html.Span(f"{format_value(sma)} ", style=get_signal_style(trend_signals['SMA'])),
+                            html.Span(f"({trend_signals['SMA']})", style=get_signal_style(trend_signals['SMA']))
                         ]),
-                        html.Div([
-                            html.Strong("Kijun: "),
-                            html.Span(format_value(data['trend_indicators']['ichimoku']['kijun']))
+                        html.P([
+                            f"EMA ({trend_lookback}): ",
+                            html.Span(f"{format_value(ema)} ", style=get_signal_style(trend_signals['EMA'])),
+                            html.Span(f"({trend_signals['EMA']})", style=get_signal_style(trend_signals['EMA']))
                         ]),
-                        html.Div([
-                            html.Strong("Senkou A: "),
-                            html.Span(format_value(data['trend_indicators']['ichimoku']['senkou_a']))
-                        ]),
-                        html.Div([
-                            html.Strong("Senkou B: "),
-                            html.Span(format_value(data['trend_indicators']['ichimoku']['senkou_b']))
-                        ]),
-                        html.Div([
-                            html.Strong("Cloud Color: "),
-                            html.Span(data['trend_indicators']['ichimoku']['cloud_color'].title()),
-                            html.Span(f" ({data['trend_indicators']['ichimoku']['signal']})")
+                        html.P([
+                            "MACD: ",
+                            html.Span(f"{format_value(macd)} ", style=get_signal_style(trend_signals['MACD'])),
+                            html.Span(f"({trend_signals['MACD']})", style=get_signal_style(trend_signals['MACD']))
                         ])
                     ])
-                ]),
+                ])
+                timeframe_sections.append(trend_section)
                 
-                # Momentum Indicators
-                create_indicator_section("Momentum Indicators", {
-                    "RSI": data['momentum_indicators']['rsi'],
-                    "Stochastic K": data['momentum_indicators']['stochastic']['k'],
-                    "Stochastic D": data['momentum_indicators']['stochastic']['d'],
-                    "CCI": data['momentum_indicators']['cci'],
-                    "ROC": data['momentum_indicators']['roc'],
-                    "ADX": data['momentum_indicators']['adx']
-                }),
+                # Momentum Indicators (using specified lookback)
+                mom_lookback = params['momentum_bars']
+                rsi = ta.rsi(mom_lookback)
+                stoch_k = ta.stoch_k()
+                stoch_d = ta.stoch_d()
                 
-                # Volatility Indicators
-                create_indicator_section("Volatility Indicators", {
-                    "ATR": data['volatility_indicators']['atr'],
-                    "Bollinger Upper": data['volatility_indicators']['bollinger_bands']['upper'],
-                    "Bollinger Middle": data['volatility_indicators']['bollinger_bands']['middle'],
-                    "Bollinger Lower": data['volatility_indicators']['bollinger_bands']['lower'],
-                    "StdDev": data['volatility_indicators']['stddev'],
-                    "Keltner Upper": data['volatility_indicators']['keltner_channels']['upper'],
-                    "Keltner Middle": data['volatility_indicators']['keltner_channels']['middle'],
-                    "Keltner Lower": data['volatility_indicators']['keltner_channels']['lower'],
-                    "Donchian Upper": data['volatility_indicators']['donchian_channel']['upper'],
-                    "Donchian Lower": data['volatility_indicators']['donchian_channel']['lower']
-                }),
+                momentum_signals = {
+                    'RSI': 'bullish' if rsi < 30 else 'bearish' if rsi > 70 else 'neutral',
+                    'Stochastic': 'bullish' if stoch_k > stoch_d and stoch_k < 20 else 'bearish' if stoch_k < stoch_d and stoch_k > 80 else 'neutral'
+                }
                 
-                # Volume Indicators
-                create_indicator_section("Volume Indicators", {
-                    "OBV": data['volume_indicators']['obv'],
-                    "AD": data['volume_indicators']['ad'],
-                    "MFI": data['volume_indicators']['mfi']
-                }),
-                
-                # Candlestick Patterns
-                html.Div([
-                    html.H5("Candlestick Patterns"),
+                momentum_section = html.Div([
+                    html.H4(f"Momentum Indicators (RSI {mom_lookback})"),
                     html.Div([
-                        html.Div([
-                            html.Strong("Single Candle: "),
-                            html.Span(", ".join(data['candlestick_patterns']['single_candle'].keys()) if data['candlestick_patterns']['single_candle'] else "None")
+                        html.P([
+                            f"RSI ({mom_lookback}): ",
+                            html.Span(f"{format_value(rsi)} ", style=get_signal_style(momentum_signals['RSI'])),
+                            html.Span(f"({momentum_signals['RSI']})", style=get_signal_style(momentum_signals['RSI']))
                         ]),
-                        html.Div([
-                            html.Strong("Two Candle: "),
-                            html.Span(", ".join(data['candlestick_patterns']['two_candle'].keys()) if data['candlestick_patterns']['two_candle'] else "None")
-                        ]),
-                        html.Div([
-                            html.Strong("Three Candle: "),
-                            html.Span(", ".join(data['candlestick_patterns']['three_candle'].keys()) if data['candlestick_patterns']['three_candle'] else "None")
+                        html.P([
+                            "Stochastic %K/%D: ",
+                            html.Span(f"{format_value(stoch_k)}/{format_value(stoch_d)} ", style=get_signal_style(momentum_signals['Stochastic'])),
+                            html.Span(f"({momentum_signals['Stochastic']})", style=get_signal_style(momentum_signals['Stochastic']))
                         ])
                     ])
-                ]),
+                ])
+                timeframe_sections.append(momentum_section)
                 
-                # Fair Value Gaps
-                html.Div([
-                    html.H5("Fair Value Gaps"),
+                # Volatility Indicators (using specified lookback)
+                vol_lookback = params['volatility_bars']
+                bb_upper = ta.bollinger_upper()
+                bb_middle = ta.bollinger_middle()
+                bb_lower = ta.bollinger_lower()
+                atr = ta.atr()
+                
+                # Calculate ATR trend
+                tr_current = max(df['High'].iloc[-1] - df['Low'].iloc[-1],
+                               abs(df['High'].iloc[-1] - df['Close'].iloc[-2]),
+                               abs(df['Low'].iloc[-1] - df['Close'].iloc[-2]))
+                tr_prev = max(df['High'].iloc[-2] - df['Low'].iloc[-2],
+                            abs(df['High'].iloc[-2] - df['Close'].iloc[-3]),
+                            abs(df['Low'].iloc[-2] - df['Close'].iloc[-3]))
+                
+                volatility_signals = {
+                    'Bollinger': 'bullish' if close < bb_lower else 'bearish' if close > bb_upper else 'neutral',
+                    'ATR': 'high' if tr_current > tr_prev else 'low'
+                }
+                
+                volatility_section = html.Div([
+                    html.H4(f"Volatility Indicators (BB {vol_lookback})"),
                     html.Div([
-                        html.Div([
-                            html.Strong("Count: "),
-                            html.Span(str(data['fair_value_gaps']['count']))
+                        html.P([
+                            "Bollinger Bands: ",
+                            html.Span(f"Upper: {format_value(bb_upper)}, Middle: {format_value(bb_middle)}, Lower: {format_value(bb_lower)} ", 
+                                    style=get_signal_style(volatility_signals['Bollinger'])),
+                            html.Span(f"({volatility_signals['Bollinger']})", style=get_signal_style(volatility_signals['Bollinger']))
                         ]),
-                        html.Div([
-                            html.Strong("Most Recent: "),
-                            html.Span(f"{data['fair_value_gaps']['most_recent']['type'].title()} Gap" if data['fair_value_gaps']['most_recent'] else "None")
-                        ]) if data['fair_value_gaps']['most_recent'] else None
+                        html.P([
+                            "ATR: ",
+                            html.Span(f"{format_value(atr)} ", style={'color': '#2196F3' if volatility_signals['ATR'] == 'high' else '#9E9E9E'}),
+                            html.Span(f"({volatility_signals['ATR']} volatility)", style={'color': '#2196F3' if volatility_signals['ATR'] == 'high' else '#9E9E9E'})
+                        ])
                     ])
                 ])
-            ]
-            timeframe_sections.extend(sections)
+                timeframe_sections.append(volatility_section)
+                
+                # Volume Indicators (using specified lookback)
+                vol_bars = params['volume_bars']
+                obv = ta.obv()
+                vol_sma = ta.volume_sma(vol_bars)
+                
+                # Calculate volume trend
+                curr_vol = df['Volume'].iloc[-1]
+                prev_vol = df['Volume'].iloc[-2]
+                vol_trend = curr_vol > prev_vol
+                price_trend = close > prev_close
+                
+                volume_signals = {
+                    'OBV': 'bullish' if vol_trend and price_trend else 'bearish'
+                }
+                
+                volume_section = html.Div([
+                    html.H4(f"Volume Indicators (last {vol_bars} bars)"),
+                    html.Div([
+                        html.P([
+                            "OBV: ",
+                            html.Span(f"{format_value(obv)} ", style=get_signal_style(volume_signals['OBV'])),
+                            html.Span(f"({volume_signals['OBV']})", style=get_signal_style(volume_signals['OBV']))
+                        ]),
+                        html.P(f"Volume SMA: {format_value(vol_sma)}")
+                    ])
+                ])
+                timeframe_sections.append(volume_section)
+                
+                # Pattern Recognition (using specified lookback)
+                pattern_bars = params['pattern_bars']
+                patterns = {
+                    'Doji': ('indecision', ta.doji()),
+                    'Hammer': ('bullish', ta.hammer()),
+                    'Engulfing': ('bullish' if ta.engulfing() else 'bearish', ta.engulfing()),
+                    'Morning Star': ('bullish', ta.morning_star()),
+                    'Evening Star': ('bearish', ta.evening_star()),
+                    'Three White Soldiers': ('bullish', ta.three_white_soldiers()),
+                    'Three Black Crows': ('bearish', ta.three_black_crows())
+                }
+                
+                pattern_section = html.Div([
+                    html.H4(f"Pattern Recognition (last {pattern_bars} bars)"),
+                    html.Div([
+                        html.P([
+                            f"{pattern}: ",
+                            html.Span(
+                                f"{'Yes' if present else 'No'} ",
+                                style=get_signal_style(signal) if present else {}
+                            ),
+                            html.Span(
+                                f"({signal})" if present else "",
+                                style=get_signal_style(signal) if present else {}
+                            )
+                        ]) for pattern, (signal, present) in patterns.items()
+                    ])
+                ])
+                timeframe_sections.append(pattern_section)
+                
+                # Fair Value Gap Analysis
+                try:
+                    fvg_bars = params['fvg_bars']
+                    recent_data = df.iloc[-fvg_bars:]
+                    
+                    fvg_gaps = []
+                    for i in range(1, len(recent_data)):
+                        curr_low = recent_data['Low'].iloc[i]
+                        curr_high = recent_data['High'].iloc[i]
+                        prev_low = recent_data['Low'].iloc[i-1]
+                        prev_high = recent_data['High'].iloc[i-1]
+                        
+                        # Check for bullish gap (support)
+                        if curr_low > prev_high:
+                            fvg_gaps.append({
+                                'type': 'bullish',
+                                'upper': curr_low,
+                                'lower': prev_high,
+                                'time': recent_data.index[i]
+                            })
+                        
+                        # Check for bearish gap (resistance)
+                        elif curr_high < prev_low:
+                            fvg_gaps.append({
+                                'type': 'bearish',
+                                'upper': prev_low,
+                                'lower': curr_high,
+                                'time': recent_data.index[i]
+                            })
+                    
+                    fvg_section = html.Div([
+                        html.H4(f"Fair Value Gaps (last {fvg_bars} bars)"),
+                        html.Div([
+                            html.P("Recent Fair Value Gaps:"),
+                            html.Div([
+                                html.P([
+                                    f"Gap at {gap['time'].strftime('%Y-%m-%d %H:%M')}: ",
+                                    html.Span(
+                                        f"{gap['type'].capitalize()} Gap - Zone: {format_value(gap['lower'])} to {format_value(gap['upper'])} ",
+                                        style=get_signal_style(gap['type'])
+                                    ),
+                                    html.Span(
+                                        f"({'Support' if gap['type'] == 'bullish' else 'Resistance'})",
+                                        style=get_signal_style(gap['type'])
+                                    )
+                                ]) for gap in fvg_gaps
+                            ]) if fvg_gaps else html.P("No Fair Value Gaps detected in recent price action")
+                        ])
+                    ])
+                    timeframe_sections.append(fvg_section)
+                    
+                except Exception as e:
+                    logger.error(f"Error calculating Fair Value Gaps: {str(e)}", exc_info=True)
+                    timeframe_sections.append(html.Div([
+                        html.H4("Fair Value Gaps (FVG)"),
+                        html.P(f"Error calculating Fair Value Gaps: {str(e)}")
+                    ]))
+                
+                # Add timeframe section
+                all_sections.append(html.Div([
+                    html.H3(f"{timeframe} Timeframe", style={
+                        'marginTop': '30px',
+                        'marginBottom': '20px',
+                        'borderBottom': '2px solid #ccc'
+                    }),
+                    html.Div(timeframe_sections, style={
+                        'marginLeft': '20px'
+                    })
+                ], style={
+                    'backgroundColor': '#f8f9fa',
+                    'padding': '20px',
+                    'borderRadius': '5px',
+                    'marginBottom': '20px'
+                }))
+                
+            except Exception as e:
+                logger.error(f"Error calculating indicators for {timeframe} timeframe: {str(e)}", exc_info=True)
+                all_sections.append(html.Div([
+                    html.H3(f"{timeframe} Timeframe"),
+                    html.P(f"Error calculating indicators: {str(e)}")
+                ]))
         
-        return html.Div([
-            html.H3(f"Technical Analysis for {symbol}"),
-            *timeframe_sections
-        ])
+        logger.info("Technical analysis calculation completed")
+        return html.Div(all_sections)
         
     except Exception as e:
-        logger.error(f"Error in technical analysis: {str(e)}", exc_info=True)
+        logger.error(f"Error calculating technical analysis: {str(e)}", exc_info=True)
         return html.Div(f"Error calculating technical analysis: {str(e)}")
 
 class StockApp(QMainWindow):
